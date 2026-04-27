@@ -179,6 +179,7 @@ impl State {
                         &TabletDescriptor::from(&device),
                     );
                 }
+                self.common.idle_notifier_state.notify_activity(&seat);
             }
             InputEvent::DeviceRemoved { device } => {
                 for seat in &mut self.common.shell.read().seats.iter() {
@@ -192,6 +193,7 @@ impl State {
                                 seat.tablet_seat().clear_tools();
                             }
                         }
+                        self.common.idle_notifier_state.notify_activity(seat);
                         break;
                     }
                 }
