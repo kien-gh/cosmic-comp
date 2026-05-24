@@ -249,6 +249,7 @@ pub struct PendingWindow {
     pub seat: Seat<State>,
     pub fullscreen: Option<Output>,
     pub maximized: bool,
+    pub sticky: bool,
 }
 
 #[derive(Debug)]
@@ -2591,6 +2592,7 @@ impl Shell {
                     *state = Some(MaximizedState {
                         original_geometry: geometry,
                         original_layer: ManagedLayer::Floating,
+                        original_snapped: was_snapped,
                     });
                     std::mem::drop(state);
                     workspace.floating_layer.map_maximized(
@@ -2625,6 +2627,7 @@ impl Shell {
                         *state = Some(MaximizedState {
                             original_geometry: previous_geometry,
                             original_layer: ManagedLayer::Tiling,
+                            original_snapped: None,
                         });
                         std::mem::drop(state);
                         workspace.floating_layer.map_maximized(
@@ -2647,6 +2650,7 @@ impl Shell {
                         *state = Some(MaximizedState {
                             original_geometry: geometry,
                             original_layer: ManagedLayer::Floating,
+                            original_snapped: None,
                         });
                         std::mem::drop(state);
                         workspace.floating_layer.map_maximized(
@@ -2681,23 +2685,19 @@ impl Shell {
             seat,
             fullscreen: output,
             maximized: should_be_maximized,
+            sticky: mut should_be_sticky,
         } = self.pending_windows.remove(pos);
 
-        let parent_is_sticky = if let Some(toplevel) = window.0.toplevel() {
-            if let Some(parent) = toplevel.parent() {
-                if let Some(elem) = self.element_for_surface(&parent) {
-                    self.workspaces
-                        .sets
-                        .values()
-                        .any(|set| set.sticky_layer.mapped().any(|m| m == elem))
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        } else {
-            false
+        if !should_be_sticky
+            && let Some(toplevel) = window.0.toplevel()
+            && let Some(parent) = toplevel.parent()
+            && let Some(elem) = self.element_for_surface(&parent)
+        {
+            should_be_sticky = self
+                .workspaces
+                .sets
+                .values()
+                .any(|set| set.sticky_layer.mapped().any(|m| m == elem));
         };
 
         let pending_activation = self.pending_activations.remove(&(&window).into());
@@ -2811,7 +2811,7 @@ impl Shell {
                 .map(mapped.clone(), Some(focus_stack.iter()), None);
         }
 
-        if parent_is_sticky {
+        if should_be_sticky {
             self.toggle_sticky(&seat, &mapped);
         }
 
@@ -2821,7 +2821,7 @@ impl Shell {
 
         let new_target = if (workspace_output == seat.active_output()
             && active_handle == workspace_handle)
-            || parent_is_sticky
+            || should_be_sticky
         {
             // TODO: enforce focus stealing prevention by also checking the same rules as for the else case.
             Some(KeyboardFocusTarget::from(mapped.clone()))
@@ -2952,6 +2952,7 @@ impl Shell {
                     seat: seat.clone(),
                     fullscreen: None,
                     maximized: false,
+                    sticky: false,
                 });
             }
         }
@@ -3372,6 +3373,7 @@ impl Shell {
                 *mapped.maximized_state.lock().unwrap() = Some(MaximizedState {
                     original_geometry: geometry,
                     original_layer: ManagedLayer::Floating,
+                    original_snapped: was_snapped,
                 });
                 to_workspace
                     .floating_layer
@@ -3883,7 +3885,7 @@ impl Shell {
         let Some(focused) = (match target {
             KeyboardFocusTarget::Popup(popup) => {
                 let Some(toplevel_surface) = (match popup {
-                    PopupKind::Xdg(xdg) => get_popup_toplevel(&xdg),
+                    PopupKind::Xdg(_) => get_popup_toplevel(&popup),
                     PopupKind::InputMethod(_) => unreachable!(),
                 }) else {
                     return FocusResult::None;
@@ -4281,6 +4283,7 @@ impl Shell {
             *state = Some(MaximizedState {
                 original_geometry,
                 original_layer,
+                original_snapped: None,
             });
             std::mem::drop(state);
             floating_layer.map_maximized(mapped.clone(), original_geometry, animate);
@@ -4304,7 +4307,7 @@ impl Shell {
                     .iter_mut()
                     .find(|m| m.mapped().is_some_and(|m| m == mapped))
                 {
-                    minimized.unmaximize(state.original_geometry);
+                    minimized.unmaximize(state.original_geometry, state.original_snapped);
                 } else {
                     mapped.set_maximized(false);
                     set.sticky_layer.map_internal(
@@ -4313,6 +4316,10 @@ impl Shell {
                         Some(state.original_geometry.size.as_logical()),
                         None,
                     );
+                    // Re-apply the snap if the window was snapped when it was maximized.
+                    if let Some(corners) = state.original_snapped {
+                        set.sticky_layer.snap_to_corner(mapped, &corners);
+                    }
                 }
                 Some(state.original_geometry.size.as_logical())
             } else {
@@ -4341,6 +4348,20 @@ impl Shell {
             check_grab_preconditions(seat, serial, client_initiated.then_some(surface))?;
         let mapped = self.element_for_surface(surface).cloned()?;
         if mapped.is_maximized(true) {
+            return None;
+        }
+
+        // Reject duplicate resize requests (e.g. Steam sends two
+        // _NET_WM_MOVERESIZE messages). Creating a new grab while one is
+        // already active would corrupt the resize state when the old grab's
+        // ungrab() overwrites the freshly-set Resizing state.
+        if let Some(ResizeState::Resizing(data)) = *mapped.resize_state.lock().unwrap() {
+            tracing::warn!(
+                app_id = mapped.active_window().app_id(),
+                active_edges = ?data.edges,
+                requested_edges = ?edges,
+                "Rejecting duplicate resize request while resize is already active",
+            );
             return None;
         }
 
@@ -4575,11 +4596,13 @@ impl Shell {
             if let Some(MaximizedState {
                 original_geometry,
                 original_layer: _,
+                original_snapped,
             }) = *state
             {
                 *state = Some(MaximizedState {
                     original_geometry,
                     original_layer: ManagedLayer::Sticky,
+                    original_snapped,
                 });
                 std::mem::drop(state);
                 set.workspaces[set.active].floating_layer.map_maximized(
@@ -4623,11 +4646,13 @@ impl Shell {
             if let Some(MaximizedState {
                 original_geometry,
                 original_layer: _,
+                original_snapped,
             }) = *state
             {
                 *state = Some(MaximizedState {
                     original_geometry,
                     original_layer: previous_layer,
+                    original_snapped,
                 });
                 std::mem::drop(state);
                 workspace
