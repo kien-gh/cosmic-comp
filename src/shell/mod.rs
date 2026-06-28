@@ -439,6 +439,11 @@ fn create_workspace_from_pinned(
             | WorkspaceCapabilities::Pin
             | WorkspaceCapabilities::Move,
     );
+
+    if let Some(ref name) = pinned.name {
+        state.set_workspace_name(&workspace_handle, name);
+    }
+
     Workspace::from_pinned(
         pinned,
         workspace_handle,
@@ -619,6 +624,7 @@ impl WorkspaceSet {
             state,
             self.workspaces.len() as u8 + 1,
             &workspace.handle,
+            workspace.name.as_deref(),
             // this method is only used by code paths related to dynamic workspaces, so this should be fine
         );
         self.workspaces.push(workspace);
@@ -680,7 +686,12 @@ impl WorkspaceSet {
 
     fn update_workspace_idxs(&self, state: &mut WorkspaceUpdateGuard<'_, State>) {
         for (i, workspace) in self.workspaces.iter().enumerate() {
-            workspace_set_idx(state, i as u8 + 1, &workspace.handle);
+            workspace_set_idx(
+                state,
+                i as u8 + 1,
+                &workspace.handle,
+                workspace.name.as_deref(),
+            );
         }
     }
 
@@ -1577,7 +1588,9 @@ impl Common {
         self.popups.cleanup();
         self.toplevel_info_state.refresh(&self.workspace_state);
         self.refresh_idle_inhibit();
-        self.a11y_keyboard_monitor_state.refresh();
+        if let Some(mut a11y_keyboard_monitor) = self.dbus_state.a11y_keyboard_monitor() {
+            a11y_keyboard_monitor.refresh();
+        }
         self.image_copy_capture_state.cleanup();
     }
 
@@ -5023,8 +5036,9 @@ fn workspace_set_idx(
     state: &mut WorkspaceUpdateGuard<'_, State>,
     idx: u8,
     handle: &WorkspaceHandle,
+    name: Option<&str>,
 ) {
-    state.set_workspace_name(handle, format!("{}", idx));
+    state.set_workspace_name(handle, name.unwrap_or(&format!("{}", idx)));
     state.set_workspace_coordinates(handle, &[idx as u32]);
 }
 

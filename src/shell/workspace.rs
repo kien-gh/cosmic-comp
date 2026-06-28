@@ -111,6 +111,7 @@ pub struct Workspace {
     pub fullscreen_surfaces: Vec<FullscreenSurface>,
     pub pinned: bool,
     pub id: Option<String>,
+    pub name: Option<String>,
 
     pub handle: WorkspaceHandle,
     pub focus_stack: FocusStacks,
@@ -386,6 +387,7 @@ impl Workspace {
             fullscreen_surfaces: Vec::new(),
             pinned: false,
             id: None,
+            name: None,
             handle,
             focus_stack: FocusStacks::default(),
             image_copy: ImageCopySessions::default(),
@@ -419,6 +421,7 @@ impl Workspace {
             fullscreen_surfaces: Vec::new(),
             pinned: true,
             id: pinned.id.clone(),
+            name: pinned.name.clone(),
             handle,
             focus_stack: FocusStacks::default(),
             image_copy: ImageCopySessions::default(),
@@ -436,9 +439,9 @@ impl Workspace {
     }
 
     pub fn to_pinned(&self) -> Option<PinnedWorkspace> {
-        debug_assert!(self.id.is_some());
         let output = self.explicit_output().clone();
         if self.pinned {
+            debug_assert!(self.id.is_some());
             Some(PinnedWorkspace {
                 output: cosmic_comp_config::workspace::OutputMatch {
                     name: output.name,
@@ -446,6 +449,7 @@ impl Workspace {
                 },
                 tiling_enabled: self.tiling_enabled,
                 id: self.id.clone(),
+                name: self.name.clone(),
             })
         } else {
             None
@@ -1753,13 +1757,17 @@ impl Workspace {
                 self.floating_layer
                     .render::<R>(
                         renderer,
-                        focused.as_ref().and_then(|target| {
-                            if let FocusTarget::Window(mapped) = target {
-                                Some(mapped)
-                            } else {
-                                None
-                            }
-                        }),
+                        render_focus
+                            .then(|| {
+                                focused.as_ref().and_then(|target| {
+                                    if let FocusTarget::Window(mapped) = target {
+                                        Some(mapped)
+                                    } else {
+                                        None
+                                    }
+                                })
+                            })
+                            .flatten(),
                         resize_indicator.clone(),
                         indicator_thickness,
                         alpha,
